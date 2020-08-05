@@ -138,6 +138,9 @@ rv_leader_pitch <- s19 %>%
   arrange(rv.hat) %>% 
   select(player_name, pitch_type, rv.hat, N, everything())
 
+#save(rv_leader_pitch, file = "rv_leader_pitch.RData")
+load("rv_leader_pitch.RData")
+
 # RV Leader for arsenal, weighted by use
 rv_leader_arsenal <- rv_leader_pitch %>% 
   group_by(player_name) %>% 
@@ -149,6 +152,9 @@ rv_leader_arsenal <- rv_leader_pitch %>%
     rv.ars = sum(rv.weight)
   ) %>% 
   arrange(rv.ars)
+
+#save(rv_leader_arsenal, file = "rv_leader_arsenal.RData")
+load('rv_leader_arsenal.RData')
 
 # Actual v Predicted
 actual_predict <- s19 %>% 
@@ -163,19 +169,31 @@ actual_predict <- s19 %>%
   filter(N > 50) %>% 
   summarise_all(mean) %>% 
   arrange(Diff)
+
+#save(actual_predict, file = 'actual_predict.RData')
+load('actual_predict.RData')
   
 ## Best Location
 
 # Average Stuff for each pitch type by pitcher hand
 avg_stuff <- s19 %>% 
   select(pitch_type, pfx_x, pfx_z, release_speed, release_spin_rate,
-         right_pitch, right_hit, isFB) %>% 
-  group_by(right_pitch, pitch_type) %>% 
+         right_pitch, right_hit) %>% 
+  group_by(right_pitch, right_hit, pitch_type) %>% 
   summarise_all(mean)
+
+avg_stuff_quantile <- s19 %>% 
+  select(pitch_type, pfx_x, pfx_z, release_speed, release_spin_rate,
+         right_pitch, right_hit) %>% 
+  group_by(right_pitch, right_hit, pitch_type) %>% 
+  summarise_all(.funs = function(x) list(enframe(quantile(x, probs = c(0.1, 0.25, 0.5, 0.75, 0.9), na.rm = TRUE)))) %>% 
+  unnest(c(pfx_x, pfx_z, release_speed, release_spin_rate), names_sep = "_") %>% 
+  rename_all(funs(str_replace(.,"_name", "_pct"))) %>% 
+  rename_all(funs(str_remove(.,"_value")))
 
 # Join Average stuff to pitcher locations and run model
 location_avgstuff <- s19 %>% 
-  select(player_name, pitch_type, right_pitch, plate_x, plate_z) %>% 
+  select(player_name, pitch_type, right_pitch, right_hit, plate_x, plate_z, isFB) %>% 
   left_join(.,avg_stuff) %>% 
   mutate(
     rv.hat = predict(rv.rf, .)
@@ -189,18 +207,92 @@ location_avgstuff <- s19 %>%
   select(player_name, pitch_type, rv.hat, N) %>% 
   arrange(rv.hat)
 
-pitch_stuff_sum <- s19 %>% 
-  select(pitch_type, player_name, pfx_x, pfx_z, 
-         release_speed, release_spin_rate,
-         right_pitch, right_hit, isFB) %>% 
-  group_by(player_name, pitch_type) %>%
+#save(location_avgstuff, file = 'location_avgstuff.RData')
+load('location_avgstuff.RData')
+
+# Comparison within Zone
+
+# Function to make plate grid with pitch type
+plate_grid <- function(pitch = "FF") {
+  plate_grid <- expand.grid(plate_x = seq(-1.5, 1.5, length=50),
+                            plate_z = seq(1, 4, length=50)) %>% # Create zone grid
+    mutate( # Label Zone parts
+      zone = case_when(plate_x > -6.7/12 & plate_x <= 0 & plate_z > 22/12 & plate_z <= 2.5 ~ "Heart Low Left",
+                       plate_x > -6.7/12 & plate_x <= 0 & plate_z > 2.5 & plate_z <= 38/12 ~ "Heart High Left",
+                       plate_x <= 6.7/12 & plate_x > 0 & plate_z > 22/12 & plate_z <= 2.5 ~ "Heart Low Right",
+                       plate_x <= 6.7/12 & plate_x > 0 & plate_z > 2.5 & plate_z <= 38/12 ~ "Heart High Right",
+                       plate_x > -6.7/12 & plate_x <= 0 & plate_z <= 22/12 & plate_z > 14/12 |
+                         plate_x > -13.3/12 & plate_x <= -6.7/12 & plate_z <= 2.5 & plate_z > 14/12 ~ "Shadow Low Left",
+                       plate_x > -6.7/12 & plate_x <= 0 & plate_z > 38/12 & plate_z <= 46/12 |
+                         plate_x > -13.3/12 & plate_x <= -6.7/12 & plate_z > 2.5 & plate_z <= 46/12 ~ "Shadow High Left",
+                       plate_x <= 6.7/12 & plate_x > 0 & plate_z <= 22/12 & plate_z > 14/12 |
+                         plate_x <= 13.3/12 & plate_x > 6.7/12 & plate_z <= 2.5 & plate_z > 14/12 ~ "Shadow Low Right",
+                       plate_x <= 6.7/12 & plate_x > 0 & plate_z > 38/12 & plate_z <= 46/12 |
+                         plate_x <= 13.3/12 & plate_x > 6.7/12 & plate_z > 2.5 & plate_z <= 46/12 ~ "Shadow High Right",
+                       plate_x > -20/12 & plate_x <= 0 & plate_z <= 4.5 & plate_z > 46/12 |
+                         plate_x <= -13.3/12 & plate_x > -20/12 & plate_z > 2.5 & plate_z <= 46/12 ~ "Chase High Left",
+                       plate_x > -20/12 & plate_x <= 0 & plate_z <= 14/12 & plate_z > 0.5 |
+                         plate_x <= -13.3/12 & plate_x > -20/12 & plate_z <= 2.5 & plate_z > 0.5  ~ "Chase Low Left",
+                       plate_x <= 20/12 & plate_x > 0 & plate_z <= 4.5 & plate_z > 46/12 |
+                         plate_x > 13.3/12 & plate_x <= 20/12 & plate_z > 2.5 & plate_z <= 46/12 ~ "Chase High Right",
+                       plate_x <= 20/12 & plate_x > 0 & plate_z <= 14/12 & plate_z > 0.5 |
+                         plate_x > 13.3/12 & plate_x <= 20/12 & plate_z <= 2.5 & plate_z > 0.5  ~ "Chase Low Right",
+                       TRUE ~ "Waste"),
+      pitch_type = pitch
+    )
+  
+  return(plate_grid)
+}
+
+# Find average run value within each zone
+zone_rv <- left_join(plate_grid("FF"), filter(avg_stuff, pitch_type == "FF", right_pitch == 1, right_hit == 1)) %>% 
   mutate(
-    N = n()
-  ) %>%
-  filter(N > 300) %>% 
-  summarise_all(mean, na.rm = T)
+    isFB = 1
+  ) %>% 
+  mutate(
+    rv.hat = predict(rv.rf,.)
+  ) %>% 
+  group_by(zone) %>% 
+  summarise(
+    zone_rv_hat = mean(rv.hat)
+  )
 
-plate_grid <- expand.grid(plate_x = seq(-1.5, 1.5, length=50),
-                    plate_z = seq(1, 4, length=50))  
+# Compare two players
+player_stuff <- s19 %>%
+  select(player_name, pitch_type, pfx_x, pfx_z, release_speed, release_spin_rate,
+         right_pitch) %>% 
+  group_by(player_name, pitch_type) %>% 
+  summarise_all(mean)
 
+player_zone_compare <- left_join(plate_grid("FF"), filter(player_stuff, player_name == "Gerrit Cole" | player_name == "Kyle Hendricks", pitch_type == "FF")) %>% 
+  mutate(
+    isFB = 1,
+    right_hit = 1
+  ) %>% 
+  mutate(
+    rv.hat = predict(rv.rf,.)
+  ) %>% 
+  group_by(player_name, zone) %>% 
+  summarise(
+    zone_rv.hat = mean(rv.hat)
+  ) %>% 
+  arrange(zone)
 
+## Velo Effect on RV
+velo_FF <- tibble(pitch_type = "FF",
+                  plate_x = 0, 
+                  plate_z = 2.5, 
+                  release_speed = rep(87:100, 2),
+                  right_pitch = 1,
+                  right_hit =1,
+                  release_spin_rate = rep(c(2300, 2800), each = 14),
+                  isFB = 1
+                  ) %>%  
+  left_join(., select(avg_stuff, -release_speed, -release_spin_rate)) %>% 
+  mutate(
+    rv.hat = predict(rv.rf,.)
+  )
+
+ggplot(velo_FF, aes(x = release_speed, y = rv.hat)) +
+  geom_line(aes(color = as.factor(release_spin_rate))) +
+  theme_minimal()
